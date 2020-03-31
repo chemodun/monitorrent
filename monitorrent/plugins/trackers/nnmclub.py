@@ -110,7 +110,7 @@ class NnmClubTracker(object):
     def get_cookies(self):
         if not self.sid:
             return False
-        return {'phpbb2mysql_4_sid': self.sid}
+        return {'phpbb2mysql_4_sid': self.sid, 'ssl': 'enable_ssl'}
 
     def get_download_url(self, url):
         cookies = self.get_cookies()
