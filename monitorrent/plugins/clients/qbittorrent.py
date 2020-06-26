@@ -3,7 +3,6 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-import json
 import six
 
 import tempfile
@@ -16,7 +15,6 @@ from qbittorrentapi import Client
 from monitorrent.db import Base, DBSession
 from monitorrent.plugin_managers import register_plugin
 from datetime import datetime
-import dateutil.parser
 
 
 class QBittorrentCredentials(Base):
@@ -76,6 +74,10 @@ class QBittorrentClientPlugin(object):
 
             client = Client(host=address, username=cred.username, password=cred.password)
             client.app_version()
+            return QBittorrentClientPlugin._decorate_post(client)
+
+            client = Client(host=address, username=cred.username, password=cred.password)
+            client.app_version()
             return client
         
     def get_settings(self):
@@ -97,7 +99,11 @@ class QBittorrentClientPlugin(object):
             cred.password = settings.get('password', None)
 
     def check_connection(self):
-        return self._get_client()
+        try:
+            return self._get_client()
+            return True
+        except:
+            return False
 
     def find_torrent(self, torrent_hash):
         client = self._get_client()
@@ -149,6 +155,19 @@ class QBittorrentClientPlugin(object):
 
         client.torrents_delete(hashes=[torrent_hash.lower()])
         return True
+
+    @staticmethod
+    def _decorate_post(client):
+        def _post_decorator(func):
+            def _post_wrapper(*args, **kwargs):
+                if 'torrent_contents' in kwargs:
+                    kwargs['files'] = kwargs['torrent_contents']
+                    del kwargs['torrent_contents']
+                return func(*args, **kwargs)
+            return _post_wrapper
+
+        client._post = _post_decorator(client._post)
+        return client
 
 
 register_plugin('client', 'qbittorrent', QBittorrentClientPlugin())

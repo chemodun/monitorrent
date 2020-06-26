@@ -100,19 +100,18 @@ class QBittorrentPluginTest(DbTestCase):
 
         rpc_client.torrents_info.assert_not_called()
 
-    def test_add_torrent_bad_settings(self):
+    @patch('monitorrent.plugins.clients.qbittorrent.Client')
+    def test_find_torrent_no_settings(self, qbittorrent_client):
+        client = qbittorrent_client.return_value
+        
+        torrent_hash = "8347DD6415598A7409DFC3D1AB95078F959BFB93"
         plugin = QBittorrentClientPlugin()
-        torrent = b'torrent'
-        self.assertFalse(plugin.add_torrent(torrent, None))
 
-    @patch('requests.Session.post')
-    def test_add_torrent_failed(self, post_mock):
-        response = Response()
-        response._content = b"Ok."
-        response.status_code = 200
+        plugin.find_torrent(torrent_hash)
 
-        post_mock.side_effect = [response, Exception('boom')]
+        client.torrents_info.assert_not_called()
 
+    def test_add_torrent_bad_settings(self):
         plugin = QBittorrentClientPlugin()
         settings = self.DEFAULT_SETTINGS
         plugin.set_settings(settings)
@@ -145,7 +144,8 @@ class QBittorrentPluginTest(DbTestCase):
         torrent = b'torrent'
         self.assertEqual('Ok.', plugin.add_torrent(torrent, TopicSettings("/path/to/download")))
 
-    def test_remove_torrent_bad_settings(self):
+    @patch('monitorrent.plugins.clients.qbittorrent.Client')
+    def test_remove_torrent_bad_settings(self, qbittorrent_client):
         plugin = QBittorrentClientPlugin()
         torrent = b'torrent'
         self.assertFalse(plugin.remove_torrent(torrent))
