@@ -568,7 +568,7 @@ class LostFilmTVTracker(object):
             return None
 
         def parse_download(table):
-            quality = table.find('div', class_="result_label").text.strip()
+            quality = table.find('div', class_="inner-box--label").text.strip()
             download_url = table.find('a').attrs['href']
 
             return LostFileDownloadInfo(LostFilmQuality.parse(quality), download_url)
@@ -587,7 +587,7 @@ class LostFilmTVTracker(object):
                                      **self.tracker_settings.get_requests_kwargs())
 
         soup = get_soup(download_page.text)
-        return list(map(parse_download, soup.find_all('div', class_='result')))
+        return list(map(parse_download, soup.find_all('div', class_='inner-box--item')))
 
 
 class LostFilmPlugin(WithCredentialsMixin, TrackerPluginBase):
