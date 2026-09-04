@@ -265,6 +265,7 @@ class LoginResult(Enum):
     Ok = 1
     CredentialsNotSpecified = 2
     IncorrentLoginPassword = 3
+    CaptchaRequired = 4
     InternalServerError = 500
     ServiceUnavailable = 503
     Unknown = 999
@@ -276,6 +277,8 @@ class LoginResult(Enum):
             return u"Credentials not specified"
         if self == LoginResult.IncorrentLoginPassword:
             return u"Incorrent login/password"
+        if self == LoginResult.CaptchaRequired:
+            return u"Login form is protected by CAPTCHA, login with username/password is not possible"
         if self == LoginResult.InternalServerError:
             return u"Internal server error"
         if self == LoginResult.ServiceUnavailable:

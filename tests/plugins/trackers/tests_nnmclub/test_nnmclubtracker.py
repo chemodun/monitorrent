@@ -1,10 +1,12 @@
 # coding=utf-8
 import httpretty
+import requests_mock
 from monitorrent.plugins.trackers import TrackerSettings
 from monitorrent.plugins.trackers.nnmclub import NnmClubTracker, LoginResult, NnmClubLoginFailedException
 from unittest import TestCase
 from tests import use_vcr
-from tests.plugins.trackers.tests_nnmclub.nnmclub_helper import NnmClubTrackerHelper
+from tests.plugins.trackers.tests_nnmclub.nnmclub_helper import NnmClubTrackerHelper, \
+    LOGIN_FORM, TURNSTILE, CAPTCHA_ERROR_PAGE, WRONG_PASSWORD_PAGE
 
 # helper = NnmClubTrackerHelper.login('login@gmail.com', 'p@$$w0rd')
 helper = NnmClubTrackerHelper()
@@ -47,21 +49,70 @@ class NnmClubTrackerTest(TestCase):
             result = self.tracker.parse_url(url)
             self.assertFalse(result)
 
-    @helper.use_vcr(inject_cassette=True)
-    def test_login(self, cassette):
-        # login will update cassette
-        check_sid = len(cassette) > 0
-        self.tracker.login(helper.real_username, helper.real_password)
-        if check_sid:
-            self.assertTrue((self.tracker.sid == helper.real_sid) or (self.tracker.sid == helper.fake_sid))
-        self.assertTrue((self.tracker.user_id == helper.real_user_id) or (self.tracker.user_id == helper.fake_user_id))
+    def test_parse_user_id(self):
+        # url encoded a:1:{s:6:"userid";s:7:"9876543";}
+        data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'
+        self.assertEqual(NnmClubTracker.parse_user_id(data), u'9876543')
 
-    @use_vcr()
+    def test_login_posts_the_form_of_the_login_page(self):
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/login.php', text=LOGIN_FORM.format(captcha=u''))
+            post = mocker.post(u'https://nnmclub.to/forum/login.php', text=WRONG_PASSWORD_PAGE)
+
+            with self.assertRaises(NnmClubLoginFailedException):
+                self.tracker.login(u'\u041f\u0440\u0438\u0432\u0435\u0442', helper.fake_password)
+
+        body = post.last_request.text
+        # login.php rejects the form unless the token rendered into it is posted back
+        self.assertIn(u'code=56171b2fc24dfd1a', body)
+        self.assertIn(u'autologin=on', body)
+        # the forum is windows-1251, not utf-8
+        self.assertIn(u'username=%CF%F0%E8%E2%E5%F2', body)
+
+    def test_login_without_session_cookie(self):
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/login.php', text=LOGIN_FORM.format(captcha=u''))
+            mocker.post(u'https://nnmclub.to/forum/login.php', status_code=302,
+                        headers={u'location': u'https://nnmclub.to/forum/index.php'})
+            mocker.get(u'https://nnmclub.to/forum/index.php', text=u'ok')
+
+            with self.assertRaises(NnmClubLoginFailedException) as cm:
+                self.tracker.login(helper.fake_username, helper.fake_password)
+
+        self.assertEqual(cm.exception.code, NnmClubLoginFailedException.CODE_NO_SESSION_COOKIE)
+
     def test_fail_login(self):
-        with self.assertRaises(NnmClubLoginFailedException) as cm:
-            self.tracker.login(u"admin@nnmclub.to", u"FAKE_PASSWORD")
-        self.assertEqual(cm.exception.code, 1)
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/login.php', text=LOGIN_FORM.format(captcha=u''))
+            mocker.post(u'https://nnmclub.to/forum/login.php', text=WRONG_PASSWORD_PAGE)
+
+            with self.assertRaises(NnmClubLoginFailedException) as cm:
+                self.tracker.login(u"admin@nnmclub.to", u"FAKE_PASSWORD")
+
+        self.assertEqual(cm.exception.code, NnmClubLoginFailedException.CODE_INVALID_LOGIN_PASSWORD)
         self.assertEqual(cm.exception.message, u'Invalid login or password')
+
+    def test_fail_login_captcha_on_form(self):
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/login.php', text=LOGIN_FORM.format(captcha=TURNSTILE))
+            post = mocker.post(u'https://nnmclub.to/forum/login.php', text=CAPTCHA_ERROR_PAGE)
+
+            with self.assertRaises(NnmClubLoginFailedException) as cm:
+                self.tracker.login(helper.fake_username, helper.fake_password)
+
+        self.assertEqual(cm.exception.code, NnmClubLoginFailedException.CODE_CAPTCHA_REQUIRED)
+        # there is no point in sending credentials to a form that is going to reject them
+        self.assertFalse(post.called)
+
+    def test_fail_login_captcha_in_response(self):
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/login.php', text=LOGIN_FORM.format(captcha=u''))
+            mocker.post(u'https://nnmclub.to/forum/login.php', text=CAPTCHA_ERROR_PAGE)
+
+            with self.assertRaises(NnmClubLoginFailedException) as cm:
+                self.tracker.login(helper.fake_username, helper.fake_password)
+
+        self.assertEqual(cm.exception.code, NnmClubLoginFailedException.CODE_CAPTCHA_REQUIRED)
 
     @helper.use_vcr(inject_cassette=True)
     def test_verify(self, cassette):
@@ -73,6 +124,19 @@ class NnmClubTrackerTest(TestCase):
 
     def test_verify_false(self):
         self.assertFalse(self.tracker.verify())
+
+    def test_verify_without_user_id(self):
+        # a session pasted by hand carries no user id, the logout link tells logged in from anonymous
+        tracker = NnmClubTracker(sid=u'2' * 32)
+        tracker.tracker_settings = self.tracker_settings
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/index.php',
+                       text=u'<a href="login.php?logout=true&amp;sid=' + u'2' * 32 + u'">Exit</a>')
+            self.assertTrue(tracker.verify())
+
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/index.php', text=u'<a href="login.php">Login</a>')
+            self.assertFalse(tracker.verify())
 
     @use_vcr()
     def test_verify_fail(self):

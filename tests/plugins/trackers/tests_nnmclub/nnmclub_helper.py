@@ -8,7 +8,6 @@ from builtins import object
 # coding=utf-8
 from io import BytesIO, StringIO
 from vcr.cassette import Cassette
-from requests import Session
 import inspect
 import functools
 import re
@@ -16,9 +15,29 @@ import gzip
 import http.cookies
 import urllib.request, urllib.parse, urllib.error
 from tests import use_vcr
+from monitorrent.plugins.trackers import TrackerSettings
+from monitorrent.plugins.trackers.nnmclub import NnmClubTracker
 from monitorrent.utils.soup import get_soup
-from urllib.parse import urlparse, unquote, quote
-from phpserialize import loads
+from urllib.parse import quote
+
+
+# a stripped down copy of https://nnmclub.to/forum/login.php
+LOGIN_FORM = u'''<html><body><form action="login.php" method="post" id="loginFrm">
+<input type="text" name="username" size="25" maxlength="40" value="" />
+<input type="password" name="password" size="25" maxlength="32" />
+{captcha}
+<input type="checkbox" name="autologin" checked="checked" />
+<input type="hidden" name="redirect" value="" />
+<input type="hidden" name="code" value="56171b2fc24dfd1a" />
+<input type="submit" name="login" class="mainoption" value="Вход" />
+</form></body></html>'''
+
+TURNSTILE = u'<div class="cf-turnstile" data-sitekey="0x4AAAAAAAhS8bNcgfb-0Kni"></div>'
+
+# login.php renders this when the CAPTCHA token is missing or invalid
+CAPTCHA_ERROR_PAGE = u'<html><body><span class="gen">Вы ввели неверный код подтверждения</span></body></html>'
+
+WRONG_PASSWORD_PAGE = u'<html><body><span class="gen">Вы ввели неверный пароль</span></body></html>'
 
 
 class NnmClubTrackerHelper(object):
@@ -44,18 +63,29 @@ class NnmClubTrackerHelper(object):
 
     @classmethod
     def login(cls, username, password):
-        login_url = 'http://nnmclub.to/forum/login.php'
-        s = Session()
-        data = {"username": username, "password": password, "autologin": "on", "login": "%C2%F5%EE%E4"}
-        login_result = s.post(login_url, data)
-        if login_result.url.startswith(login_url):
-            raise Exception("Can't login to NNM Club")
-        sid = s.cookies['phpbb2mysql_4_sid']
-        data = s.cookies['phpbb2mysql_4_data']
-        parsed_data = loads(unquote(data))
-        userid = parsed_data['userid']
-        helper = cls(username, password, userid, sid)
-        helper.fake_user_id = helper.fake_user_id[:len(userid)]
+        """
+        Records real credentials for cassette recording.
+
+        nnmclub.to guards login.php with a CAPTCHA, so this only works while that guard is down.
+        Use :meth:`from_session` with a session cookie taken from a browser otherwise.
+        """
+        tracker = NnmClubTracker()
+        tracker.tracker_settings = TrackerSettings(10, None)
+        tracker.login(username, password)
+        return cls._create(username, password, tracker.user_id, tracker.sid)
+
+    @classmethod
+    def from_session(cls, username, sid, user_id=None):
+        """
+        Records a session copied from a browser (the phpbb2mysql_4_sid cookie)
+        """
+        return cls._create(username, None, user_id, sid)
+
+    @classmethod
+    def _create(cls, username, password, user_id, sid):
+        helper = cls(username, password, user_id, sid)
+        if user_id:
+            helper.fake_user_id = helper.fake_user_id[:len(user_id)]
         return helper
 
     def hide_sensitive_data(self, cassette):

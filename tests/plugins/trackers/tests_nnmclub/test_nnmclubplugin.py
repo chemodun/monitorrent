@@ -1,9 +1,13 @@
 # coding=utf-8
+import requests_mock
 from mock import patch
+from monitorrent.db import DBSession
 from monitorrent.plugins.trackers import LoginResult, TrackerSettings
-from monitorrent.plugins.trackers.nnmclub import NnmClubPlugin, NnmClubTopic, NnmClubLoginFailedException
+from monitorrent.plugins.trackers.nnmclub import NnmClubPlugin, NnmClubTopic, NnmClubCredentials, \
+    NnmClubLoginFailedException
 from tests import DbTestCase, use_vcr
-from tests.plugins.trackers.tests_nnmclub.nnmclub_helper import NnmClubTrackerHelper
+from tests.plugins.trackers.tests_nnmclub.nnmclub_helper import NnmClubTrackerHelper, \
+    LOGIN_FORM, TURNSTILE, WRONG_PASSWORD_PAGE
 
 #helper = NnmClubTrackerHelper.login('login@gmail.com', 'p@$$w0rd')
 helper = NnmClubTrackerHelper()
@@ -41,7 +45,6 @@ class NnmClubPluginTest(DbTestCase):
         parsed_url = self.plugin.parse_url(u'https://nnmclub.to/forum/viewtopic.php?t=1')
         self.assertIsNone(parsed_url)
 
-    @helper.use_vcr()
     def test_login_verify(self):
         self.assertFalse(self.plugin.verify())
         self.assertEqual(self.plugin.login(), LoginResult.CredentialsNotSpecified)
@@ -50,18 +53,73 @@ class NnmClubPluginTest(DbTestCase):
         self.assertEqual(self.plugin.update_credentials(credentials), LoginResult.CredentialsNotSpecified)
         self.assertFalse(self.plugin.verify())
 
-        credentials = {u'username': helper.fake_username, u'password': helper.fake_password}
-        self.assertEqual(self.plugin.update_credentials(credentials), LoginResult.IncorrentLoginPassword)
-        self.assertFalse(self.plugin.verify())
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/login.php', text=LOGIN_FORM.format(captcha=u''))
+            mocker.post(u'https://nnmclub.to/forum/login.php', text=WRONG_PASSWORD_PAGE)
 
-        credentials = {u'username': helper.real_username, u'password': helper.real_password}
-        self.assertEqual(self.plugin.update_credentials(credentials), LoginResult.Ok)
-        self.assertTrue(self.plugin.verify())
+            credentials = {u'username': helper.fake_username, u'password': helper.fake_password}
+            self.assertEqual(self.plugin.update_credentials(credentials), LoginResult.IncorrentLoginPassword)
+            self.assertFalse(self.plugin.verify())
+
+    def test_login_stores_session_of_the_tracker(self):
+        sid = u'0123456789abcdef0123456789abcdef'
+        profile_url = u'https://nnmclub.to/forum/profile.php?mode=viewprofile&u=9876543'
+
+        def login(username, password):
+            self.plugin.tracker.setup(u'9876543', sid)
+
+        with patch.object(self.plugin.tracker, u'login', side_effect=login):
+            with requests_mock.Mocker() as mocker:
+                mocker.get(profile_url, text=u'profile')
+
+                credentials = {u'username': helper.real_username, u'password': helper.real_password}
+                self.assertEqual(self.plugin.update_credentials(credentials), LoginResult.Ok)
+                self.assertTrue(self.plugin.verify())
+
+        with DBSession() as db:
+            cred = db.query(NnmClubCredentials).first()
+            self.assertEqual(cred.sid, sid)
+            self.assertEqual(cred.user_id, u'9876543')
+
+    def test_login_with_captcha_on_login_form(self):
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/login.php', text=LOGIN_FORM.format(captcha=TURNSTILE))
+
+            credentials = {u'username': helper.fake_username, u'password': helper.fake_password}
+            self.assertEqual(self.plugin.update_credentials(credentials), LoginResult.CaptchaRequired)
+
+    def test_login_with_session_from_browser(self):
+        """
+        While login.php is behind a CAPTCHA the session cookie copied from a browser is the only way in
+        """
+        sid = u'0123456789abcdef0123456789abcdef'
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/index.php',
+                       text=u'<a href="login.php?logout=true&amp;sid=' + sid + u'">Exit</a>')
+
+            credentials = {u'username': u'', u'password': u'', u'sid': sid}
+            self.assertEqual(self.plugin.update_credentials(credentials), LoginResult.Ok)
+            self.assertTrue(self.plugin.verify())
+
+    def test_update_credentials_keeps_stored_session(self):
+        sid = u'0123456789abcdef0123456789abcdef'
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/index.php',
+                       text=u'<a href="login.php?logout=true&amp;sid=' + sid + u'">Exit</a>')
+
+            self.plugin.update_credentials({u'username': u'', u'password': u'', u'sid': sid})
+            # an empty session field must not drop a working session
+            self.plugin.update_credentials({u'username': u'user', u'password': u'pass', u'sid': u'  '})
+
+        with DBSession() as db:
+            self.assertEqual(db.query(NnmClubCredentials).first().sid, sid)
 
     def test_login_failed_exceptions_1(self):
         # noinspection PyUnresolvedReferences
         with patch.object(self.plugin.tracker, u'login',
-                          side_effect=NnmClubLoginFailedException(1, u'Invalid login or password')):
+                          side_effect=NnmClubLoginFailedException(
+                              NnmClubLoginFailedException.CODE_INVALID_LOGIN_PASSWORD,
+                              u'Invalid login or password')):
             credentials = {u'username': helper.real_username, u'password': helper.real_password}
             self.assertEqual(self.plugin.update_credentials(credentials), LoginResult.IncorrentLoginPassword)
 
