@@ -65,6 +65,8 @@ class TrackersManager(object):
     def set_settings(self, name, settings):
         tracker = self.get_tracker(name)
         if hasattr(tracker, 'update_credentials'):
+            # saving credentials logs in, which needs the request settings just like check_connection does
+            tracker.init(self.settings_manager.tracker_settings)
             tracker.update_credentials(settings)
             return True
         return False

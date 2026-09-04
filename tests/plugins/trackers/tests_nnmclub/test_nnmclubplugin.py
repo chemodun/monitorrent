@@ -136,6 +136,30 @@ class NnmClubPluginTest(DbTestCase):
             self.assertEqual(cred.user_id, u'9876543')
             self.assertEqual(cred.autologin_data, data)
 
+    def test_verify_stores_a_renewed_session_even_when_it_fails(self):
+        """
+        A sid renewed on the way is newer than the stale one in the db, whatever the check said
+        """
+        data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'
+        renewed = u'd' * 32
+        profile_url = u'https://nnmclub.to/forum/profile.php?mode=viewprofile&u=9876543'
+
+        with requests_mock.Mocker() as mocker:
+            mocker.get(profile_url, text=u'profile')
+            self.plugin.update_credentials({u'username': u'', u'password': u'',
+                                            u'sid': u'expired', u'autologin_data': data})
+
+        with requests_mock.Mocker() as mocker:
+            # nnmclub hands out a new sid but bounces us to the login page anyway
+            mocker.get(profile_url, status_code=302,
+                       headers={u'location': u'https://nnmclub.to/forum/login.php'},
+                       cookies={u'phpbb2mysql_4_sid': renewed})
+            mocker.get(u'https://nnmclub.to/forum/login.php', text=LOGIN_FORM.format(captcha=u''))
+            self.assertFalse(self.plugin.verify())
+
+        with DBSession() as db:
+            self.assertEqual(db.query(NnmClubCredentials).first().sid, renewed)
+
     def test_verify_stores_a_renewed_session(self):
         data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'
         renewed = u'e' * 32

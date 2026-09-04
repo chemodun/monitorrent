@@ -382,8 +382,9 @@ class NnmClubPlugin(WithCredentialsMixin, ExecuteWithHashChangeMixin, TrackerPlu
                 return False
             self.tracker.setup(cred.user_id, cred.sid, cred.autologin_data)
         verified = self.tracker.verify()
-        if verified:
-            self._save_session()
+        # a session nnmclub renewed on the way is worth keeping even when this check didn't pass,
+        # otherwise the next run starts over from the sid we already know is stale
+        self._save_session()
         return verified
 
     def _save_session(self):

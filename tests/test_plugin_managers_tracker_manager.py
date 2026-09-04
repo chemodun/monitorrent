@@ -115,6 +115,14 @@ class TrackersManagerTest(TestCase):
 
         update_credentials_mock2.assert_called_with(credentials2)
 
+    def test_set_settings_inits_tracker_settings(self):
+        # saving credentials logs in, the tracker can't make requests without the settings
+        self.tracker2.update_credentials = MagicMock()
+
+        self.assertTrue(self.trackers_manager.set_settings(TRACKER2_PLUGIN_NAME, {'login': 'username'}))
+
+        self.assertIs(self.tracker2.tracker_settings, self.trackers_manager.settings_manager.tracker_settings)
+
     def test_check_connection(self):
         self.assertFalse(self.trackers_manager.check_connection(TRACKER1_PLUGIN_NAME))
 
