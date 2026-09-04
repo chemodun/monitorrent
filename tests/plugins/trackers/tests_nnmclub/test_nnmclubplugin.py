@@ -108,11 +108,51 @@ class NnmClubPluginTest(DbTestCase):
                        text=u'<a href="login.php?logout=true&amp;sid=' + sid + u'">Exit</a>')
 
             self.plugin.update_credentials({u'username': u'', u'password': u'', u'sid': sid})
-            # an empty session field must not drop a working session
-            self.plugin.update_credentials({u'username': u'user', u'password': u'pass', u'sid': u'  '})
+            # empty session fields must not drop a working session
+            self.plugin.update_credentials({u'username': u'user', u'password': u'pass',
+                                            u'sid': u'  ', u'autologin_data': u''})
 
         with DBSession() as db:
             self.assertEqual(db.query(NnmClubCredentials).first().sid, sid)
+
+    def test_login_with_autologin_cookie(self):
+        """
+        The autologin cookie alone is enough: phpBB builds a session out of it and the plugin
+        stores the sid it gets back
+        """
+        data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'
+        issued = u'f' * 32
+        profile_url = u'https://nnmclub.to/forum/profile.php?mode=viewprofile&u=9876543'
+
+        with requests_mock.Mocker() as mocker:
+            mocker.get(profile_url, text=u'profile', cookies={u'phpbb2mysql_4_sid': issued})
+
+            credentials = {u'username': u'', u'password': u'', u'autologin_data': data}
+            self.assertEqual(self.plugin.update_credentials(credentials), LoginResult.Ok)
+
+        with DBSession() as db:
+            cred = db.query(NnmClubCredentials).first()
+            self.assertEqual(cred.sid, issued)
+            self.assertEqual(cred.user_id, u'9876543')
+            self.assertEqual(cred.autologin_data, data)
+
+    def test_verify_stores_a_renewed_session(self):
+        data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'
+        renewed = u'e' * 32
+        profile_url = u'https://nnmclub.to/forum/profile.php?mode=viewprofile&u=9876543'
+
+        with requests_mock.Mocker() as mocker:
+            mocker.get(profile_url, text=u'profile')
+            self.plugin.update_credentials({u'username': u'', u'password': u'',
+                                            u'sid': u'expired', u'autologin_data': data})
+
+        with requests_mock.Mocker() as mocker:
+            mocker.get(profile_url, text=u'profile', cookies={u'phpbb2mysql_4_sid': renewed})
+            self.assertTrue(self.plugin.verify())
+
+        with DBSession() as db:
+            # the sid nnmclub handed out replaces the expired one without any user action
+            self.assertEqual(db.query(NnmClubCredentials).first().sid, renewed)
 
     def test_login_failed_exceptions_1(self):
         # noinspection PyUnresolvedReferences

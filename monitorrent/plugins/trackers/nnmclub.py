@@ -7,7 +7,7 @@ import six
 from requests import Session
 import requests
 import urllib.request, urllib.parse, urllib.error
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey, MetaData, Table
 from monitorrent.db import Base, DBSession
 from monitorrent.plugins import Topic
 from monitorrent.plugin_managers import register_plugin
@@ -30,6 +30,7 @@ class NnmClubCredentials(Base):
     password = Column(String, primary_key=True)
     user_id = Column(String, nullable=True)
     sid = Column(String, nullable=True)
+    autologin_data = Column(String, nullable=True)
 
 
 class NnmClubTopic(Topic):
@@ -41,6 +42,26 @@ class NnmClubTopic(Topic):
     __mapper_args__ = {
         'polymorphic_identity': PLUGIN_NAME
     }
+
+
+# noinspection PyUnusedLocal
+def upgrade(engine, operations_factory):
+    if not engine.dialect.has_table(engine.connect(), NnmClubCredentials.__tablename__):
+        return
+    version = get_current_version(engine)
+    if version == 0:
+        with operations_factory() as operations:
+            operations.add_column(NnmClubCredentials.__tablename__,
+                                  Column('autologin_data', String, nullable=True))
+        version = 1
+
+
+def get_current_version(engine):
+    m = MetaData(engine)
+    credentials = Table(NnmClubCredentials.__tablename__, m, autoload=True)
+    if 'autologin_data' not in credentials.columns:
+        return 0
+    return 1
 
 
 class NnmClubLoginFailedException(Exception):
@@ -66,13 +87,15 @@ class NnmClubTracker(object):
     _captcha_error = u'неверный код подтверждения'
     _captcha_classes = ['cf-turnstile', 'g-recaptcha']
 
-    def __init__(self, user_id=None, sid=None):
+    def __init__(self, user_id=None, sid=None, autologin_data=None):
         self.user_id = user_id
         self.sid = sid
+        self.autologin_data = autologin_data
 
-    def setup(self, user_id=None, sid=None):
+    def setup(self, user_id=None, sid=None, autologin_data=None):
         self.user_id = user_id
         self.sid = sid
+        self.autologin_data = autologin_data
 
     def can_parse_url(self, url):
         parsed_url = urlparse(url)
@@ -128,22 +151,55 @@ class NnmClubTracker(object):
             raise NnmClubLoginFailedException(NnmClubLoginFailedException.CODE_NO_SESSION_COOKIE,
                                               "Login page didn't set a session cookie")
         self.sid = s.cookies[u'phpbb2mysql_4_sid']
-        self.user_id = self.parse_user_id(s.cookies[u'phpbb2mysql_4_data'])
+        # with autologin on this cookie carries the key phpBB revives an expired session from
+        self.autologin_data = s.cookies.get(u'phpbb2mysql_4_data')
+        # without it the user id stays unknown and verify() falls back to the logout marker
+        self.user_id = self.parse_user_id(self.autologin_data) if self.autologin_data else None
 
     def verify(self):
         cookies = self.get_cookies()
         if not cookies:
             return False
+
+        if not self.user_id and self.autologin_data:
+            # the autologin cookie carries the user id, no need to go looking for it
+            try:
+                self.user_id = self.parse_user_id(self.autologin_data)
+            except Exception as e:
+                log.info("Can't read the user id out of the autologin cookie", exception=str(e))
+
+        s = Session()
         if self.user_id:
             profile_page_url = self._profile_page.format(self.user_id)
-            profile_page_result = requests.get(profile_page_url, cookies=cookies,
-                                               **self.tracker_settings.get_requests_kwargs())
-            return profile_page_result.url == profile_page_url
+            result = s.get(profile_page_url, cookies=cookies, **self.tracker_settings.get_requests_kwargs())
+            self._pick_up_renewed_session(s, result)
+            return result.url == profile_page_url
         # the session was set up by hand and the user id is unknown:
         # the logout link is only rendered for a logged in user
-        index_page_result = requests.get(self._index_url, cookies=cookies,
-                                         **self.tracker_settings.get_requests_kwargs())
-        return u'logout=true' in index_page_result.text
+        result = s.get(self._index_url, cookies=cookies, **self.tracker_settings.get_requests_kwargs())
+        self._pick_up_renewed_session(s, result)
+        return u'logout=true' in result.text
+
+    def _pick_up_renewed_session(self, session, response):
+        """
+        When the sid has expired phpBB revives the session from the autologin cookie and issues
+        a new one, which has to replace the sid we were holding
+        """
+        sid = self._find_session_cookie(session, response)
+        if sid and sid != self.sid:
+            log.info("nnmclub.to issued a new session id")
+            self.sid = sid
+
+    @staticmethod
+    def _find_session_cookie(session, response):
+        # the new sid can arrive on the final response or on any redirect on the way to it
+        sid = session.cookies.get(u'phpbb2mysql_4_sid')
+        if sid:
+            return sid
+        for r in list(response.history) + [response]:
+            if u'phpbb2mysql_4_sid' in r.cookies:
+                return r.cookies[u'phpbb2mysql_4_sid']
+        return None
 
     @staticmethod
     def parse_user_id(data_cookie):
@@ -177,9 +233,15 @@ class NnmClubTracker(object):
                         for k, v in data.items())
 
     def get_cookies(self):
-        if not self.sid:
+        if not self.sid and not self.autologin_data:
             return False
-        return {'phpbb2mysql_4_sid': self.sid, 'ssl': 'enable_ssl'}
+        cookies = {'ssl': 'enable_ssl'}
+        if self.sid:
+            cookies['phpbb2mysql_4_sid'] = self.sid
+        if self.autologin_data:
+            # lets phpBB rebuild the session on its own once the sid has expired
+            cookies['phpbb2mysql_4_data'] = self.autologin_data
+        return cookies
 
     def get_download_url(self, url):
         cookies = self.get_cookies()
@@ -210,19 +272,21 @@ class NnmClubPlugin(WithCredentialsMixin, ExecuteWithHashChangeMixin, TrackerPlu
     tracker = NnmClubTracker()
     topic_class = NnmClubTopic
     credentials_class = NnmClubCredentials
-    credentials_public_fields = ['username', 'sid']
-    credentials_private_fields = ['username', 'password', 'user_id', 'sid']
+    # the fields holding a session copied from a browser
+    session_fields = ['sid', 'autologin_data']
+    credentials_public_fields = ['username', 'sid', 'autologin_data']
+    credentials_private_fields = ['username', 'password', 'user_id', 'sid', 'autologin_data']
     credentials_form = [{
         'type': 'row',
         'content': [{
             'type': 'text',
             'model': 'username',
-            'label': 'Username',
+            'label': 'Username (unused while login needs a CAPTCHA)',
             'flex': 50
         }, {
             "type": "password",
             "model": "password",
-            "label": "Password",
+            "label": "Password (unused while login needs a CAPTCHA)",
             "flex": 50
         }]
     }, {
@@ -230,7 +294,15 @@ class NnmClubPlugin(WithCredentialsMixin, ExecuteWithHashChangeMixin, TrackerPlu
         'content': [{
             'type': 'text',
             'model': 'sid',
-            'label': 'Session id (phpbb2mysql_4_sid cookie, needed while login is behind a CAPTCHA)',
+            'label': 'Session id - the phpbb2mysql_4_sid cookie from your browser',
+            'flex': 100
+        }]
+    }, {
+        'type': 'row',
+        'content': [{
+            'type': 'text',
+            'model': 'autologin_data',
+            'label': 'Autologin - the phpbb2mysql_4_data cookie, renews the session when it expires',
             'flex': 100
         }]
     }]
@@ -246,21 +318,25 @@ class NnmClubPlugin(WithCredentialsMixin, ExecuteWithHashChangeMixin, TrackerPlu
 
     def update_credentials(self, credentials):
         credentials = dict(credentials)
-        sid = credentials.get('sid')
-        if sid is not None:
-            sid = sid.strip()
-            if not sid:
-                # an empty field means "keep what is stored", don't drop a working session
-                del credentials['sid']
+        for field in self.session_fields:
+            value = credentials.get(field)
+            if value is None:
+                continue
+            value = value.strip()
+            if value:
+                credentials[field] = value
             else:
-                credentials['sid'] = sid
-        if 'sid' in credentials:
-            with DBSession() as db:
-                cred = db.query(self.credentials_class).first()
-                if cred is None or cred.sid != credentials['sid']:
-                    # a session pasted by hand may belong to another account, the stored user id
-                    # no longer applies to it
-                    credentials['user_id'] = None
+                # an empty field means "keep what is stored", don't drop a working session
+                del credentials[field]
+
+        with DBSession() as db:
+            cred = db.query(self.credentials_class).first()
+            session_changed = cred is None or any(field in credentials and credentials[field] != getattr(cred, field)
+                                                  for field in self.session_fields)
+        if session_changed:
+            # a session pasted by hand may belong to another account, the stored user id
+            # no longer applies to it
+            credentials['user_id'] = None
         return super(NnmClubPlugin, self).update_credentials(credentials)
 
     def login(self):
@@ -272,12 +348,14 @@ class NnmClubPlugin(WithCredentialsMixin, ExecuteWithHashChangeMixin, TrackerPlu
             password = cred.password
             user_id = cred.user_id
             sid = cred.sid
+            autologin_data = cred.autologin_data
 
         # a session copied from the browser wins over username/password: while login.php
         # is protected by a CAPTCHA it is the only way to get a working session
-        if sid:
-            self.tracker.setup(user_id, sid)
+        if sid or autologin_data:
+            self.tracker.setup(user_id, sid, autologin_data)
             if self.tracker.verify():
+                self._save_session()
                 return LoginResult.Ok
 
         if not username or not password:
@@ -285,10 +363,7 @@ class NnmClubPlugin(WithCredentialsMixin, ExecuteWithHashChangeMixin, TrackerPlu
 
         try:
             self.tracker.login(username, password)
-            with DBSession() as db:
-                cred = db.query(self.credentials_class).first()
-                cred.user_id = self.tracker.user_id
-                cred.sid = self.tracker.sid
+            self._save_session()
             return LoginResult.Ok
         except NnmClubLoginFailedException as e:
             if e.code == NnmClubLoginFailedException.CODE_INVALID_LOGIN_PASSWORD:
@@ -303,10 +378,27 @@ class NnmClubPlugin(WithCredentialsMixin, ExecuteWithHashChangeMixin, TrackerPlu
     def verify(self):
         with DBSession() as db:
             cred = db.query(self.credentials_class).first()
-            if not cred or not cred.sid:
+            if not cred or not (cred.sid or cred.autologin_data):
                 return False
-            self.tracker.setup(cred.user_id, cred.sid)
-        return self.tracker.verify()
+            self.tracker.setup(cred.user_id, cred.sid, cred.autologin_data)
+        verified = self.tracker.verify()
+        if verified:
+            self._save_session()
+        return verified
+
+    def _save_session(self):
+        """
+        Stores whatever session the tracker ended up holding: phpBB hands out a new sid every time
+        it revives an expired session from the autologin cookie
+        """
+        with DBSession() as db:
+            cred = db.query(self.credentials_class).first()
+            if cred is None:
+                return
+            cred.user_id = self.tracker.user_id
+            cred.sid = self.tracker.sid
+            if self.tracker.autologin_data:
+                cred.autologin_data = self.tracker.autologin_data
 
     def can_parse_url(self, url):
         return self.tracker.can_parse_url(url)
@@ -320,4 +412,4 @@ class NnmClubPlugin(WithCredentialsMixin, ExecuteWithHashChangeMixin, TrackerPlu
         return request.prepare()
 
 
-register_plugin('tracker', PLUGIN_NAME, NnmClubPlugin())
+register_plugin('tracker', PLUGIN_NAME, NnmClubPlugin(), upgrade=upgrade)

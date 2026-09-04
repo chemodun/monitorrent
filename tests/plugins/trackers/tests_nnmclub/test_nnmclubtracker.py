@@ -125,6 +125,58 @@ class NnmClubTrackerTest(TestCase):
     def test_verify_false(self):
         self.assertFalse(self.tracker.verify())
 
+    def test_get_cookies_carries_the_autologin_cookie(self):
+        sid = u'0123456789abcdef0123456789abcdef'
+        data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'
+
+        cookies = NnmClubTracker(sid=sid, autologin_data=data).get_cookies()
+        self.assertEqual(cookies[u'phpbb2mysql_4_sid'], sid)
+        self.assertEqual(cookies[u'phpbb2mysql_4_data'], data)
+
+        # the autologin cookie on its own is enough for phpBB to build a session
+        cookies = NnmClubTracker(autologin_data=data).get_cookies()
+        self.assertEqual(cookies[u'phpbb2mysql_4_data'], data)
+        self.assertNotIn(u'phpbb2mysql_4_sid', cookies)
+
+        self.assertFalse(NnmClubTracker().get_cookies())
+
+    def test_verify_takes_user_id_from_the_autologin_cookie(self):
+        data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'
+        tracker = NnmClubTracker(autologin_data=data)
+        tracker.tracker_settings = self.tracker_settings
+
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/profile.php?mode=viewprofile&u=9876543', text=u'profile')
+            self.assertTrue(tracker.verify())
+
+        self.assertEqual(tracker.user_id, u'9876543')
+
+    def test_verify_picks_up_a_renewed_session(self):
+        data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'
+        renewed = u'f' * 32
+        tracker = NnmClubTracker(u'9876543', u'expired', data)
+        tracker.tracker_settings = self.tracker_settings
+
+        with requests_mock.Mocker() as mocker:
+            # phpBB revives the session from the autologin cookie and hands out a new sid
+            mocker.get(u'https://nnmclub.to/forum/profile.php?mode=viewprofile&u=9876543', text=u'profile',
+                       cookies={u'phpbb2mysql_4_sid': renewed})
+            self.assertTrue(tracker.verify())
+
+        self.assertEqual(tracker.sid, renewed)
+
+    def test_verify_keeps_a_session_that_is_still_valid(self):
+        sid = u'0123456789abcdef0123456789abcdef'
+        data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'
+        tracker = NnmClubTracker(u'9876543', sid, data)
+        tracker.tracker_settings = self.tracker_settings
+
+        with requests_mock.Mocker() as mocker:
+            mocker.get(u'https://nnmclub.to/forum/profile.php?mode=viewprofile&u=9876543', text=u'profile')
+            self.assertTrue(tracker.verify())
+
+        self.assertEqual(tracker.sid, sid)
+
     def test_verify_without_user_id(self):
         # a session pasted by hand carries no user id, the logout link tells logged in from anonymous
         tracker = NnmClubTracker(sid=u'2' * 32)
