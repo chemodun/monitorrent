@@ -165,6 +165,38 @@ class NnmClubTrackerTest(TestCase):
 
         self.assertEqual(tracker.sid, renewed)
 
+    def test_verify_drops_the_held_sid_when_it_can_autologin(self):
+        """
+        nnmclub.to only issues a session id when the request carries none, so a sid that is sent
+        is never replaced - it has to be left out for a fresh one to arrive
+        """
+        data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'
+        issued = u'a' * 32
+        tracker = NnmClubTracker(u'9876543', u'stale', data)
+        tracker.tracker_settings = self.tracker_settings
+
+        with requests_mock.Mocker() as mocker:
+            profile = mocker.get(u'https://nnmclub.to/forum/profile.php?mode=viewprofile&u=9876543',
+                                 text=u'profile', cookies={u'phpbb2mysql_4_sid': issued})
+            self.assertTrue(tracker.verify())
+
+        sent = profile.last_request.headers.get('Cookie')
+        self.assertIn(u'phpbb2mysql_4_data', sent)
+        self.assertNotIn(u'stale', sent)
+        self.assertEqual(tracker.sid, issued)
+
+    def test_verify_keeps_the_sid_without_an_autologin_cookie(self):
+        # with nothing to log in with, the sid is all we have and has to be sent
+        tracker = NnmClubTracker(u'9876543', u'0123456789abcdef0123456789abcdef')
+        tracker.tracker_settings = self.tracker_settings
+
+        with requests_mock.Mocker() as mocker:
+            profile = mocker.get(u'https://nnmclub.to/forum/profile.php?mode=viewprofile&u=9876543',
+                                 text=u'profile')
+            self.assertTrue(tracker.verify())
+
+        self.assertIn(u'0123456789abcdef0123456789abcdef', profile.last_request.headers.get('Cookie'))
+
     def test_verify_keeps_a_session_that_is_still_valid(self):
         sid = u'0123456789abcdef0123456789abcdef'
         data = u'a%3A1%3A%7Bs%3A6%3A%22userid%22%3Bs%3A7%3A%229876543%22%3B%7D'

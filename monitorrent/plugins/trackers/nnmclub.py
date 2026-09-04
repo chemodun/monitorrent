@@ -168,6 +168,13 @@ class NnmClubTracker(object):
             except Exception as e:
                 log.info("Can't read the user id out of the autologin cookie", exception=str(e))
 
+        if self.autologin_data:
+            # nnmclub.to only hands out a session id when the request carries none, and says nothing
+            # when it carries one - valid or long dead. Holding on to a sid would therefore keep a
+            # stale one forever, so drop it here and let the autologin cookie earn a fresh session.
+            # The rest of the run reuses the sid this picks up.
+            cookies.pop(u'phpbb2mysql_4_sid', None)
+
         s = Session()
         if self.user_id:
             profile_page_url = self._profile_page.format(self.user_id)
@@ -182,8 +189,8 @@ class NnmClubTracker(object):
 
     def _pick_up_renewed_session(self, session, response):
         """
-        When the sid has expired phpBB revives the session from the autologin cookie and issues
-        a new one, which has to replace the sid we were holding
+        phpBB builds a session out of the autologin cookie and issues a session id for it,
+        which has to replace whatever sid we were holding
         """
         sid = self._find_session_cookie(session, response)
         if sid and sid != self.sid:
